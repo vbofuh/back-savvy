@@ -1,0 +1,206 @@
+﻿from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from sqlalchemy.orm import Session
+from typing import List, Optional
+import logging
+from datetime import datetime
+
+from ...database import get_db, SessionLocal
+from ...models.user import User
+from ...models.imap_setting import ImapSetting
+from ...models.receipt import Receipt
+from ...schemas.imap_setting import ImapSettingCreate, ImapSettingUpdate, ImapSettingResponse
+from ...services.auth_service import get_current_user
+from ...services.encryption_service import encrypt_password
+from ...services.imap_service import IMAPClient, extract_receipt_info
+
+# ตั้งค่า logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/imap-settings", tags=["imap-settings"])
+
+@router.post("/", response_model=ImapSettingResponse, status_code=status.HTTP_201_CREATED)
+def create_imap_setting(
+    imap_setting: ImapSettingCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # โค้ดเดิมของคุณ...
+    """สร้างการตั้งค่า IMAP ใหม่"""
+    # ตรวจสอบว่ามีการตั้งค่าสำหรับอีเมลนี้แล้วหรือไม่
+    db_imap_setting = db.query(ImapSetting).filter(
+        ImapSetting.user_id == current_user.id,
+        ImapSetting.email == imap_setting.email
+    ).first()
+    
+    if db_imap_setting:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="มีการตั้งค่า IMAP สำหรับอีเมลนี้แล้ว"
+        )
+    
+    # เข้ารหัสรหัสผ่าน
+    encrypted_password = encrypt_password(imap_setting.password)
+    
+    # สร้างการตั้งค่าใหม่
+    db_imap_setting = ImapSetting(
+        user_id=current_user.id,
+        email=imap_setting.email,
+        server=imap_setting.server,
+        port=imap_setting.port,
+        username=imap_setting.username,
+        password_encrypted=encrypted_password,
+        use_ssl=imap_setting.use_ssl,
+        folder=imap_setting.folder
+    )
+    
+    db.add(db_imap_setting)
+    db.commit()
+    db.refresh(db_imap_setting)
+    
+    return db_imap_setting
+
+# เพิ่ม endpoint ต่อไปนี้หลังจากโค้ดเดิมของคุณ
+
+@router.post("/{imap_setting_id}/test", status_code=status.HTTP_200_OK)
+def test_imap_connection(
+    imap_setting_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """ทดสอบการเชื่อมต่อ IMAP"""
+    db_imap_setting = db.query(ImapSetting).filter(
+        ImapSetting.id == imap_setting_id,
+        ImapSetting.user_id == current_user.id
+    ).first()
+    
+    if not db_imap_setting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ไม่พบการตั้งค่า IMAP"
+        )
+    
+    # ทดสอบการเชื่อมต่อ
+    imap_client = IMAPClient(db_imap_setting)
+    connected = imap_client.connect()
+    
+    if connected:
+        imap_client.disconnect()
+        return {"status": "success", "message": "เชื่อมต่อกับเซิร์ฟเวอร์ IMAP สำเร็จ"}
+    else:
+        return {"status": "error", "message": "ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ IMAP ได้"}
+
+@router.post("/{imap_setting_id}/sync", status_code=status.HTTP_202_ACCEPTED)
+def sync_emails(
+    imap_setting_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """เริ่มซิงค์อีเมลในเบื้องหลัง"""
+    db_imap_setting = db.query(ImapSetting).filter(
+        ImapSetting.id == imap_setting_id,
+        ImapSetting.user_id == current_user.id
+    ).first()
+    
+    if not db_imap_setting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ไม่พบการตั้งค่า IMAP"
+        )
+    
+    # เพิ่มงานในเบื้องหลัง
+    background_tasks.add_task(sync_emails_background, imap_setting_id, current_user.id)
+    
+    # อัปเดตเวลาซิงค์ล่าสุด
+    db_imap_setting.last_sync = datetime.now()
+    db.commit()
+    
+    return {"status": "accepted", "message": "เริ่มซิงค์อีเมลในเบื้องหลังแล้ว"}
+
+def sync_emails_background(imap_setting_id: int, user_id: int):
+    """ฟังก์ชันสำหรับทำงานในเบื้องหลัง เพื่อซิงค์อีเมล"""
+    # เปิด session ใหม่
+    db_session = SessionLocal()
+    
+    try:
+        # ดึงข้อมูลการตั้งค่า IMAP
+        db_imap_setting = db_session.query(ImapSetting).filter(
+            ImapSetting.id == imap_setting_id,
+            ImapSetting.user_id == user_id
+        ).first()
+        
+        if not db_imap_setting:
+            logger.error(f"ไม่พบการตั้งค่า IMAP ID: {imap_setting_id}")
+            return
+        
+        # เชื่อมต่อกับ IMAP
+        imap_client = IMAPClient(db_imap_setting)
+        if not imap_client.connect():
+            logger.error(f"ไม่สามารถเชื่อมต่อกับ IMAP ID: {imap_setting_id}")
+            return
+        
+        try:
+            # ค้นหาอีเมล - แก้ไขส่วนนี้ให้ใช้ search_emails ที่ถูกต้อง
+            message_ids = imap_client.search_emails(days=30)
+            logger.info(f"พบอีเมลทั้งหมด {len(message_ids)} รายการ")
+            
+            # ดึงข้อมูลอีเมลและสร้างใบเสร็จ
+            receipt_count = 0
+            for message_id in message_ids:
+                email_data = imap_client.get_email(message_id)
+                if not email_data:
+                    continue
+                
+                # แยกข้อมูลใบเสร็จ
+                receipt_data = extract_receipt_info(email_data)
+                if not receipt_data or receipt_data["amount"] == 0:
+                    continue
+                
+                # ตรวจสอบว่ามีใบเสร็จนี้อยู่แล้วหรือไม่
+                existing_receipt = db_session.query(Receipt).filter(
+                    Receipt.user_id == user_id,
+                    Receipt.email_id == receipt_data["email_id"]
+                ).first()
+                
+                if existing_receipt:
+                    continue
+                
+                # สร้างใบเสร็จใหม่
+                new_receipt = Receipt(
+                    user_id=user_id,
+                    email_id=receipt_data["email_id"],
+                    email_subject=receipt_data["email_subject"],
+                    email_from=receipt_data["email_from"],
+                    email_date=receipt_data["email_date"],
+                    vendor_name=receipt_data["vendor_name"],
+                    receipt_date=receipt_data["receipt_date"],
+                    amount=receipt_data["amount"],
+                    currency="THB",  # ค่าเริ่มต้น
+                    receipt_file_path=receipt_data["receipt_file_path"]
+                )
+                
+                db_session.add(new_receipt)
+                receipt_count += 1
+                
+                # Commit ทุก 10 รายการเพื่อลดการใช้หน่วยความจำ
+                if receipt_count % 10 == 0:
+                    db_session.commit()
+            
+            # Commit ข้อมูลที่เหลือ
+            if receipt_count % 10 != 0:
+                db_session.commit()
+            
+            logger.info(f"สร้างใบเสร็จใหม่ทั้งหมด {receipt_count} รายการ")
+            
+        finally:
+            # ยกเลิกการเชื่อมต่อ IMAP ไม่ว่าจะสำเร็จหรือไม่
+            imap_client.disconnect()
+    
+    except Exception as e:
+        logger.error(f"เกิดข้อผิดพลาดในการซิงค์อีเมล: {str(e)}")
+        db_session.rollback()
+    
+    finally:
+        # ปิด session ไม่ว่าจะสำเร็จหรือไม่
+        db_session.close()
