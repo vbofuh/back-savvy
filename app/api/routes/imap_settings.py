@@ -3,15 +3,17 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 import logging
 from datetime import datetime
-
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
+from typing import List, Optional
 from ...database import get_db, SessionLocal
 from ...models.user import User
 from ...models.imap_setting import ImapSetting
 from ...models.receipt import Receipt
 from ...schemas.imap_setting import ImapSettingCreate, ImapSettingUpdate, ImapSettingResponse
 from ...services.auth_service import get_current_user
+from ...services.imap_service import IMAPClient
+from ...services.receipt_extractor import ReceiptExtractor
 from ...services.encryption_service import encrypt_password
-from ...services.imap_service import IMAPClient, extract_receipt_info
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO)
@@ -91,13 +93,17 @@ def test_imap_connection(
         return {"status": "error", "message": "ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ IMAP ได้"}
 
 @router.post("/{imap_setting_id}/sync", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/{imap_setting_id}/sync", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/{imap_setting_id}/sync", status_code=status.HTTP_202_ACCEPTED)
 def sync_emails(
     imap_setting_id: int,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    days_back: int = 30,
+    limit: int = 50
 ):
-    """เริ่มซิงค์อีเมลในเบื้องหลัง"""
+    """เริ่มซิงค์อีเมลในเบื้องหลัง โดยสามารถระบุจำนวนวันย้อนหลังได้"""
     db_imap_setting = db.query(ImapSetting).filter(
         ImapSetting.id == imap_setting_id,
         ImapSetting.user_id == current_user.id
@@ -109,18 +115,18 @@ def sync_emails(
             detail="ไม่พบการตั้งค่า IMAP"
         )
     
-    # เพิ่มงานในเบื้องหลัง
-    background_tasks.add_task(sync_emails_background, imap_setting_id, current_user.id)
+    # เพิ่มงานในเบื้องหลังพร้อมส่งพารามิเตอร์เพิ่มเติม
+    background_tasks.add_task(sync_emails_background, imap_setting_id, current_user.id, days_back, limit)
     
     # อัปเดตเวลาซิงค์ล่าสุด
     db_imap_setting.last_sync = datetime.now()
     db.commit()
     
-    return {"status": "accepted", "message": "เริ่มซิงค์อีเมลในเบื้องหลังแล้ว"}
+    return {"status": "accepted", "message": f"เริ่มซิงค์อีเมลย้อนหลัง {days_back} วัน จำกัด {limit} ฉบับในเบื้องหลังแล้ว"}
 
-def sync_emails_background(imap_setting_id: int, user_id: int):
+def sync_emails_background(imap_setting_id: int, user_id: int, days_back: int = 30, limit: int = 50):
+    # โค้ดส่วนที่เหลือ...
     """ฟังก์ชันสำหรับทำงานในเบื้องหลัง เพื่อซิงค์อีเมล"""
-    # เปิด session ใหม่
     db_session = SessionLocal()
     
     try:
@@ -141,8 +147,8 @@ def sync_emails_background(imap_setting_id: int, user_id: int):
             return
         
         try:
-            # ค้นหาอีเมล - แก้ไขส่วนนี้ให้ใช้ search_emails ที่ถูกต้อง
-            message_ids = imap_client.search_emails(days=30)
+            # ส่งจำนวนวันย้อนหลังและจำนวนจำกัดไปยังเมธอด search_emails
+            message_ids = imap_client.search_emails(days=days_back, limit=limit)
             logger.info(f"พบอีเมลทั้งหมด {len(message_ids)} รายการ")
             
             # ดึงข้อมูลอีเมลและสร้างใบเสร็จ
@@ -153,7 +159,7 @@ def sync_emails_background(imap_setting_id: int, user_id: int):
                     continue
                 
                 # แยกข้อมูลใบเสร็จ
-                receipt_data = extract_receipt_info(email_data)
+                receipt_data = ReceiptExtractor.extract_receipt_info(email_data)
                 if not receipt_data or receipt_data["amount"] == 0:
                     continue
                 

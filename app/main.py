@@ -3,10 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
 from .config import settings
 from .models import User, Category, Receipt
-from .api.routes import auth_router, users_router, receipts_router, categories_router
 from .services.init_data import create_initial_categories
 from .database import SessionLocal
 from .api.routes import auth_router, users_router, receipts_router, categories_router, imap_settings_router
+from .api.routes.analytics import router as analytics_router
 
 # สร้างตารางในฐานข้อมูล
 Base.metadata.create_all(bind=engine)
@@ -37,7 +37,7 @@ app.include_router(users_router, prefix=settings.API_V1_PREFIX)
 app.include_router(receipts_router, prefix=settings.API_V1_PREFIX)
 app.include_router(categories_router, prefix=settings.API_V1_PREFIX)
 app.include_router(imap_settings_router, prefix=settings.API_V1_PREFIX)
-
+app.include_router(analytics_router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/")
 def read_root():

@@ -40,6 +40,9 @@ class IMAPClient:
         except Exception as e:
             logger.error(f"เกิดข้อผิดพลาดในการเชื่อมต่อกับ IMAP: {str(e)}")
             return False
+            import traceback
+            logger.error(f"รายละเอียดข้อผิดพลาด: {traceback.format_exc()}")
+            return False
 
     def disconnect(self):
         """ยกเลิกการเชื่อมต่อ"""
@@ -49,37 +52,70 @@ class IMAPClient:
             except:
                 pass
 
-    def search_emails(self, days: int = 30, search_criteria: str = None) -> List[int]:
-        """ค้นหาอีเมลตามเงื่อนไข"""
+    def search_emails(self, days: int = 30, limit: int = 50, search_criteria: str = None) -> List[int]:
+        """ค้นหาอีเมลตามเงื่อนไข โดยสามารถระบุจำนวนวันย้อนหลังและจำนวนจำกัดได้"""
         try:
             # เลือกโฟลเดอร์
             self.connection.select(self.imap_setting.folder)
-
-            # ถ้าไม่ได้ระบุเงื่อนไขการค้นหา ให้ใช้การค้นหาอีเมลจาก Apple เกี่ยวกับใบเสร็จ
-            if search_criteria is None:
-                search_criteria = '(FROM "apple.com" SUBJECT "invoice")'
-                logger.info(f"ค้นหาอีเมลด้วยเงื่อนไข: {search_criteria}")
-
-            # ค้นหาอีเมล
-            status, data = self.connection.search(None, search_criteria)
-            if status != "OK":
-                logger.error(f"เกิดข้อผิดพลาดในการค้นหาอีเมล: {status}")
+            
+            # คำนวณวันที่ย้อนหลัง (ถ้ากำหนด days > 0)
+            date_criteria = None
+            if days > 0:
+                from datetime import datetime, timedelta
+                since_date = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
+                date_criteria = f'SINCE "{since_date}"'
+                logger.info(f"ค้นหาอีเมลตั้งแต่วันที่: {since_date}")
+            
+            # สร้างตัวแปรสำหรับเก็บ message IDs
+            all_message_ids = []
+            
+            # ค้นหาแยกตามผู้ให้บริการและรวมผล
+            sources = [
+                # [ชื่อแหล่ง, เงื่อนไขการค้นหา]
+                ["Apple", '(FROM "apple.com" SUBJECT "invoice")'],
+                ["Steam", '(FROM "steampowered.com")'],
+                ["Steam Support", '(SUBJECT "Steam Support")'],
+                ["Kasikornbank", '(FROM "kasikornbank.com")']
+            ]
+            
+            for source_name, source_criteria in sources:
+                # รวมเงื่อนไขวันที่ (ถ้ามี)
+                if date_criteria:
+                    combined_criteria = f'({source_criteria} {date_criteria})'
+                else:
+                    combined_criteria = source_criteria
+                
+                logger.info(f"ค้นหาอีเมลจาก {source_name} ด้วยเงื่อนไข: {combined_criteria}")
+                status, data = self.connection.search(None, combined_criteria)
+                
+                if status == "OK" and data[0]:
+                    ids = data[0].split()
+                    all_message_ids.extend(ids)
+                    logger.info(f"พบอีเมลจาก {source_name} {len(ids)} รายการ")
+            
+            # ตรวจสอบว่ามีข้อมูลหรือไม่
+            if not all_message_ids:
+                logger.warning("ไม่พบอีเมลที่ตรงกับเงื่อนไขทั้งหมด")
                 return []
-
-            # แปลงข้อมูลเป็นรายการ message IDs
-            message_ids = data[0].split()
-            logger.info(f"พบอีเมลทั้งหมด {len(message_ids)} รายการที่ตรงกับเงื่อนไข")
-
-            # จำกัดจำนวนอีเมลสำหรับการทดสอบ (แค่ 10 ฉบับล่าสุด)
-            if len(message_ids) > 10:
-                message_ids = message_ids[-10:]
-                logger.info("จำกัดการประมวลผลเพียง 10 ฉบับล่าสุด")
-
-            return [int(id) for id in message_ids]
-
+            
+            # เรียงลำดับและตัดซ้ำ (เรียงจากใหม่ไปเก่า)
+            unique_ids = sorted(set(all_message_ids), key=int, reverse=True)
+            
+            # จำกัดจำนวนตามที่กำหนด
+            if limit > 0 and len(unique_ids) > limit:
+                unique_ids = unique_ids[:limit]
+                logger.info(f"จำกัดการประมวลผลเพียง {limit} ฉบับล่าสุด")
+            
+            logger.info(f"รวมพบอีเมลทั้งหมด {len(unique_ids)} รายการหลังจากตัดซ้ำและจำกัดจำนวน")
+            return [int(id) for id in unique_ids]
+        
         except Exception as e:
             logger.error(f"เกิดข้อผิดพลาดในการค้นหาอีเมล: {str(e)}")
+            import traceback
+            logger.error(f"รายละเอียดข้อผิดพลาด: {traceback.format_exc()}")
             return []
+    
+    
 
     def get_email(self, message_id: int) -> Optional[Dict[str, Any]]:
         """ดึงข้อมูลอีเมล"""
@@ -206,27 +242,99 @@ def extract_receipt_info(email_data: Dict[str, Any]) -> Optional[Dict[str, Any]]
     if not email_data:
         return None
 
+    # ข้อมูลพื้นฐาน
     result = {
         "email_id": f"imap_{email_data['message_id']}",
         "email_subject": email_data["subject"],
         "email_from": email_data["from"],
         "email_date": email_data["date"],
         "receipt_date": email_data["date"],
-        "vendor_name": "Apple",
-        "amount": extract_amount(email_data["body"]),
+        "vendor_name": extract_vendor_name(email_data["from"]),
+        "amount": 0.0,
+        "currency": "THB",  # ค่าเริ่มต้น
         "receipt_file_path": None
     }
 
-    # ค้นหาวันที่ใบแจ้งหนี้
-    invoice_date_match = re.search(r'INVOICE DATE\s*(\d{1,2}\s+\w+\s+\d{4})', email_data["body"])
-    if invoice_date_match:
-        date_str = invoice_date_match.group(1)
-        try:
-            receipt_date = datetime.strptime(date_str, '%d %b %Y')
-            result["receipt_date"] = receipt_date
-        except:
-            pass
+    # ตรวจสอบว่าเป็นอีเมลจากผู้ให้บริการใด
+    from_email = email_data["from"].lower()
+    
+    if "apple.com" in from_email:
+        # ใบเสร็จ Apple
+        logger.info("ตรวจพบว่าเป็นใบเสร็จจาก Apple")
+        result["vendor_name"] = "Apple"
+        result["amount"] = extract_amount(email_data["body"])
+        
+        # ค้นหาวันที่ใบแจ้งหนี้
+        invoice_date_match = re.search(r'INVOICE DATE\s*(\d{1,2}\s+\w+\s+\d{4})', email_data["body"])
+        if invoice_date_match:
+            date_str = invoice_date_match.group(1)
+            try:
+                receipt_date = datetime.strptime(date_str, '%d %b %Y')
+                result["receipt_date"] = receipt_date
+            except:
+                pass
+    
+    elif "kplus" in from_email or "kasikornbank" in from_email:
+        # ใบเสร็จ K Plus
+        logger.info("ตรวจพบว่าเป็นใบเสร็จจาก K Plus")
+        result["vendor_name"] = "K Plus (Kasikorn Bank)"
+        
+        body = email_data["body"]
+        
+        # ค้นหาจำนวนเงิน
+        amount_match = re.search(r'จำนวนเงิน\s*\(บาท\):\s*([\d,]+\.\d{2})', body)
+        if amount_match:
+            try:
+                amount_str = amount_match.group(1).replace(',', '')
+                result["amount"] = float(amount_str)
+            except ValueError:
+                pass
+        
+        # ค้นหาวันที่ทำรายการ
+        date_match = re.search(r'วันที่ทำรายการ:\s*(\d{2}/\d{2}/\d{4})', body)
+        if date_match:
+            date_str = date_match.group(1)
+            try:
+                receipt_date = datetime.strptime(date_str, '%d/%m/%Y')
+                result["receipt_date"] = receipt_date
+            except:
+                pass
+    
+    elif "steam" in from_email or "steampowered" in from_email:
+        # ใบเสร็จ Steam
+        logger.info("ตรวจพบว่าเป็นใบเสร็จจาก Steam")
+        result["vendor_name"] = "Steam"
+        
+        body = email_data["body"]
+        
+        # ค้นหาจำนวนเงิน
+        baht_match = re.search(r'(?:Total|รวม):\s*฿\s*([\d,]+\.\d{2})', body, re.IGNORECASE)
+        if baht_match:
+            try:
+                amount_str = baht_match.group(1).replace(',', '')
+                result["amount"] = float(amount_str)
+            except ValueError:
+                pass
+        
+        # ค้นหาวันที่
+        date_match = re.search(r'Date issued:\s*(.+?)\s*(?:\r|\n|<br>)', body)
+        if date_match:
+            date_str = date_match.group(1).strip()
+            # ลองแปลงวันที่ในรูปแบบต่างๆ
+            try:
+                if '@' in date_str:  # รูปแบบ "23 Jan, 2021 @ 7:40pm"
+                    date_only = date_str.split('@')[0].strip()
+                    receipt_date = datetime.strptime(date_only, '%d %b, %Y')
+                    result["receipt_date"] = receipt_date
+            except:
+                pass
+    
+    else:
+        # กรณีทั่วไป
+        logger.info(f"ไม่พบรูปแบบเฉพาะ ใช้การตรวจจับทั่วไป จาก: {result['vendor_name']}")
+        result["amount"] = extract_amount(email_data["body"])
 
+    # ตรวจสอบไฟล์แนบ
     if email_data["attachments"]:
         result["receipt_file_path"] = email_data["attachments"][0]["filename"]
 
