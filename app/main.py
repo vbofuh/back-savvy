@@ -7,6 +7,9 @@ from .services.init_data import create_initial_categories
 from .database import SessionLocal
 from .api.routes import auth_router, users_router, receipts_router, categories_router, imap_settings_router
 from .api.routes.analytics import router as analytics_router
+from .services.init_data import create_initial_categories
+from .services.init_data import update_categories
+from .database import SessionLocal
 
 # สร้างตารางในฐานข้อมูล
 Base.metadata.create_all(bind=engine)
@@ -14,6 +17,7 @@ Base.metadata.create_all(bind=engine)
 # สร้างข้อมูลหมวดหมู่เริ่มต้น
 db = SessionLocal()
 create_initial_categories(db)
+update_categories(db)
 db.close()
 
 app = FastAPI(

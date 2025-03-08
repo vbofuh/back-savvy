@@ -72,10 +72,13 @@ class IMAPClient:
             # ค้นหาแยกตามผู้ให้บริการและรวมผล
             sources = [
                 # [ชื่อแหล่ง, เงื่อนไขการค้นหา]
-                ["Apple", '(FROM "apple.com" SUBJECT "invoice")'],
+                # ["Apple", '(FROM "apple.com" SUBJECT "invoice")'],
                 ["Steam", '(FROM "steampowered.com")'],
                 ["Steam Support", '(SUBJECT "Steam Support")'],
-                ["Kasikornbank", '(FROM "kasikornbank.com")']
+                ["Kasikornbank", '(FROM "kasikornbank.com")'],
+                ["Spotify", '(FROM "spotify.com")'],
+                ["Spotify Premium", '(FROM "spotify.com" SUBJECT "Premium")']
+                
             ]
             
             for source_name, source_criteria in sources:
@@ -274,7 +277,7 @@ def extract_receipt_info(email_data: Dict[str, Any]) -> Optional[Dict[str, Any]]
             except:
                 pass
     
-    elif "kplus" in from_email or "kasikornbank" in from_email:
+    if "kplus" in from_email or "kasikornbank" in from_email:
         # ใบเสร็จ K Plus
         logger.info("ตรวจพบว่าเป็นใบเสร็จจาก K Plus")
         result["vendor_name"] = "K Plus (Kasikorn Bank)"
@@ -304,11 +307,22 @@ def extract_receipt_info(email_data: Dict[str, Any]) -> Optional[Dict[str, Any]]
         # ใบเสร็จ Steam
         logger.info("ตรวจพบว่าเป็นใบเสร็จจาก Steam")
         result["vendor_name"] = "Steam"
-        
+
         body = email_data["body"]
         
         # ค้นหาจำนวนเงิน
+        logger.info(f"ตรวจพบว่าเป็นใบเสร็จจาก Steam: {email_data['subject']}")
+
+        # บันทึกส่วนแรกของเนื้อหาเพื่อตรวจสอบรูปแบบ
+        logger.info(f"ตัวอย่างเนื้อหา: {body[:500]}")
+
+        # บันทึกผลการค้นหาแต่ละส่วน
         baht_match = re.search(r'(?:Total|รวม):\s*฿\s*([\d,]+\.\d{2})', body, re.IGNORECASE)
+        logger.info(f"ผลการค้นหาจำนวนเงินแบบที่ 1: {baht_match}")
+
+        if not baht_match:
+            baht_match = re.search(r'฿\s*([\d,]+\.\d{2})', body, re.IGNORECASE)
+            logger.info(f"ผลการค้นหาจำนวนเงินแบบที่ 2: {baht_match}")
         if baht_match:
             try:
                 amount_str = baht_match.group(1).replace(',', '')
@@ -329,6 +343,121 @@ def extract_receipt_info(email_data: Dict[str, Any]) -> Optional[Dict[str, Any]]
             except:
                 pass
     
+    elif "spotify.com" in from_email:
+        # ใบเสร็จ Spotify
+        logger.info("ตรวจพบว่าเป็นใบเสร็จจาก Spotify")
+        result["vendor_name"] = "Spotify"
+        
+        body = email_data["body"]
+        logger.info(f"เนื้อหาอีเมล Spotify: {body[:1000]}")  # บันทึกเนื้อหาเพื่อการดีบัก
+        
+        # ค้นหาจำนวนเงินในหลายรูปแบบ
+        amount = 0.0
+        
+        # รูปแบบที่ 1: รูปแบบทั้งหมด
+        amount_match = re.search(r'ทั้งหมด\s*฿\s*([\d,]+\.\d{2})', body)
+        if amount_match:
+            try:
+                amount_str = amount_match.group(1).replace(',', '')
+                amount = float(amount_str)
+                logger.info(f"พบจำนวนเงินรูปแบบที่ 1: {amount}")
+            except ValueError:
+                pass
+        
+        # รูปแบบที่ 2: รูปแบบ Premium
+        if amount == 0:
+            premium_match = re.search(r'Premium\s*฿\s*([\d,]+\.\d{2})', body)
+            if premium_match:
+                try:
+                    amount_str = premium_match.group(1).replace(',', '')
+                    amount = float(amount_str)
+                    logger.info(f"พบจำนวนเงินรูปแบบที่ 2: {amount}")
+                except ValueError:
+                    pass
+        
+        # รูปแบบที่ 3: ค้นหาแบบทั่วไป
+        if amount == 0:
+            general_match = re.search(r'฿\s*([\d,]+\.\d{2})', body)
+            if general_match:
+                try:
+                    amount_str = general_match.group(1).replace(',', '')
+                    amount = float(amount_str)
+                    logger.info(f"พบจำนวนเงินรูปแบบที่ 3: {amount}")
+                except ValueError:
+                    pass
+        
+        # รูปแบบที่ 4: ค้นหาตัวเลขที่ตามด้วย THB หรือ บาท
+        if amount == 0:
+            thb_match = re.search(r'([\d,]+\.\d{2})\s*(?:THB|บาท)', body)
+            if thb_match:
+                try:
+                    amount_str = thb_match.group(1).replace(',', '')
+                    amount = float(amount_str)
+                    logger.info(f"พบจำนวนเงินรูปแบบที่ 4: {amount}")
+                except ValueError:
+                    pass
+        
+        # กำหนดค่าจำนวนเงินที่ค้นพบ
+        result["amount"] = amount
+        
+        # ค้นหาวันที่ในหลายรูปแบบ
+        # รูปแบบที่ 1: เดือนไทย วันที่ ปี
+        date_match = re.search(r'(มกราคม|กุมภาพันธ์|มีนาคม|เมษายน|พฤษภาคม|มิถุนายน|กรกฎาคม|สิงหาคม|กันยายน|ตุลาคม|พฤศจิกายน|ธันวาคม)\s+(\d{1,2}),?\s+(\d{4})', body)
+        if date_match:
+            try:
+                # แปลงเดือนภาษาไทยเป็นตัวเลข
+                thai_month_map = {
+                    'มกราคม': 1, 'กุมภาพันธ์': 2, 'มีนาคม': 3, 'เมษายน': 4,
+                    'พฤษภาคม': 5, 'มิถุนายน': 6, 'กรกฎาคม': 7, 'สิงหาคม': 8,
+                    'กันยายน': 9, 'ตุลาคม': 10, 'พฤศจิกายน': 11, 'ธันวาคม': 12
+                }
+                
+                month_name = date_match.group(1)
+                day = int(date_match.group(2))
+                year = int(date_match.group(3))
+                
+                month_num = thai_month_map.get(month_name, 1)
+                result["receipt_date"] = datetime(year, month_num, day)
+                logger.info(f"พบวันที่รูปแบบที่ 1: {result['receipt_date']}")
+            except (ValueError, KeyError) as e:
+                logger.error(f"ข้อผิดพลาดในการแปลงวันที่: {str(e)}")
+        
+        # รูปแบบที่ 2: วันที่ เดือนไทย ปี
+        if "receipt_date" not in result or result["receipt_date"] is None:
+            date_match2 = re.search(r'(\d{1,2})\s+(มกราคม|กุมภาพันธ์|มีนาคม|เมษายน|พฤษภาคม|มิถุนายน|กรกฎาคม|สิงหาคม|กันยายน|ตุลาคม|พฤศจิกายน|ธันวาคม)\s+(\d{4})', body)
+            if date_match2:
+                try:
+                    thai_month_map = {
+                        'มกราคม': 1, 'กุมภาพันธ์': 2, 'มีนาคม': 3, 'เมษายน': 4,
+                        'พฤษภาคม': 5, 'มิถุนายน': 6, 'กรกฎาคม': 7, 'สิงหาคม': 8,
+                        'กันยายน': 9, 'ตุลาคม': 10, 'พฤศจิกายน': 11, 'ธันวาคม': 12
+                    }
+                    
+                    day = int(date_match2.group(1))
+                    month_name = date_match2.group(2)
+                    year = int(date_match2.group(3))
+                    
+                    month_num = thai_month_map.get(month_name, 1)
+                    result["receipt_date"] = datetime(year, month_num, day)
+                    logger.info(f"พบวันที่รูปแบบที่ 2: {result['receipt_date']}")
+                except (ValueError, KeyError) as e:
+                    logger.error(f"ข้อผิดพลาดในการแปลงวันที่: {str(e)}")
+        
+        # ค้นหารหัสคำสั่งซื้อ
+        order_id_match = re.search(r'รหัสคำสั่งซื้อ\s*:\s*(\d+)', body)
+        if order_id_match:
+            result["receipt_number"] = order_id_match.group(1)
+            logger.info(f"พบรหัสคำสั่งซื้อ: {result['receipt_number']}")
+        
+        # ในกรณีที่ไม่พบรหัสคำสั่งซื้อในรูปแบบแรก ลองรูปแบบอื่น
+        if "receipt_number" not in result or not result["receipt_number"]:
+            alt_order_id_match = re.search(r'Order\s*#?:?\s*(\d+)', body, re.IGNORECASE)
+            if alt_order_id_match:
+                result["receipt_number"] = alt_order_id_match.group(1)
+                logger.info(f"พบรหัสคำสั่งซื้อรูปแบบที่ 2: {result['receipt_number']}")
+        
+        # บันทึกข้อมูลที่แยกได้ทั้งหมด
+        logger.info(f"ข้อมูลใบเสร็จ Spotify ที่สกัดได้: {result}")
     else:
         # กรณีทั่วไป
         logger.info(f"ไม่พบรูปแบบเฉพาะ ใช้การตรวจจับทั่วไป จาก: {result['vendor_name']}")

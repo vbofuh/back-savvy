@@ -14,12 +14,27 @@ from ...services.auth_service import get_current_user
 from ...services.imap_service import IMAPClient
 from ...services.receipt_extractor import ReceiptExtractor
 from ...services.encryption_service import encrypt_password
+# เพิ่มบรรทัดนี้ในส่วน imports
+from ...services.category_service import auto_categorize_vendor
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/imap-settings", tags=["imap-settings"])
+
+@router.get("/", response_model=List[ImapSettingResponse])
+def get_imap_settings(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """ดึงการตั้งค่า IMAP ทั้งหมดของผู้ใช้"""
+    settings = db.query(ImapSetting).filter(
+        ImapSetting.user_id == current_user.id
+    ).all()
+    
+    return settings
+
 
 @router.post("/", response_model=ImapSettingResponse, status_code=status.HTTP_201_CREATED)
 def create_imap_setting(
@@ -172,6 +187,9 @@ def sync_emails_background(imap_setting_id: int, user_id: int, days_back: int = 
                 if existing_receipt:
                     continue
                 
+                # ระบุหมวดหมู่อัตโนมัติตามผู้ให้บริการ
+                category_id = auto_categorize_vendor(receipt_data["vendor_name"], db_session)
+                
                 # สร้างใบเสร็จใหม่
                 new_receipt = Receipt(
                     user_id=user_id,
@@ -183,7 +201,8 @@ def sync_emails_background(imap_setting_id: int, user_id: int, days_back: int = 
                     receipt_date=receipt_data["receipt_date"],
                     amount=receipt_data["amount"],
                     currency="THB",  # ค่าเริ่มต้น
-                    receipt_file_path=receipt_data["receipt_file_path"]
+                    receipt_file_path=receipt_data["receipt_file_path"],
+                    category_id=category_id  # เพิ่มหมวดหมู่อัตโนมัติ
                 )
                 
                 db_session.add(new_receipt)
@@ -198,11 +217,11 @@ def sync_emails_background(imap_setting_id: int, user_id: int, days_back: int = 
                 db_session.commit()
             
             logger.info(f"สร้างใบเสร็จใหม่ทั้งหมด {receipt_count} รายการ")
-            
+           
         finally:
             # ยกเลิกการเชื่อมต่อ IMAP ไม่ว่าจะสำเร็จหรือไม่
             imap_client.disconnect()
-    
+        
     except Exception as e:
         logger.error(f"เกิดข้อผิดพลาดในการซิงค์อีเมล: {str(e)}")
         db_session.rollback()
