@@ -78,10 +78,6 @@ def get_monthly_expenses(
 ):
     """ดึงข้อมูลค่าใช้จ่ายรายเดือน"""
     
-    # ถ้าไม่ระบุปี ให้ใช้ปีปัจจุบัน
-    if not year:
-        year = datetime.now().year
-    
     # สร้างคำสั่ง SQL สำหรับดึงข้อมูลรายเดือน
     query = db.query(
         extract('year', Receipt.receipt_date).label('year'),
@@ -231,55 +227,68 @@ def get_categories_summary(
     total_expense = total_query.scalar() or 0
     
     # ดึงข้อมูลค่าใช้จ่ายตามหมวดหมู่
-    query = db.query(
-        Category.name.label('category_name'),
-        func.sum(Receipt.amount).label('total'),
-        func.count(Receipt.id).label('count')
-    ).join(
-        Category, Receipt.category_id == Category.id
-    ).filter(
-        Receipt.user_id == current_user.id,
-        Receipt.receipt_date >= start_date,
-        Receipt.receipt_date <= end_date
-    ).group_by(
-        Category.name
-    ).order_by(
-        desc(func.sum(Receipt.amount))
-    )
+    results = []
     
-    results = query.all()
+    try:
+        # ตรวจสอบว่ามี category ที่มีข้อมูลใบเสร็จหรือไม่
+        category_query = db.query(
+            Category.name.label('category_name'),
+            func.sum(Receipt.amount).label('total'),
+            func.count(Receipt.id).label('count')
+        ).join(
+            Category, Receipt.category_id == Category.id
+        ).filter(
+            Receipt.user_id == current_user.id,
+            Receipt.receipt_date >= start_date,
+            Receipt.receipt_date <= end_date
+        ).group_by(
+            Category.name
+        ).order_by(
+            desc(func.sum(Receipt.amount))
+        )
+        
+        category_results = category_query.all()
+        
+        # แปลงผลลัพธ์เป็นรูปแบบที่ต้องการ
+        for item in category_results:
+            results.append({
+                "category_name": item.category_name,
+                "total": float(item.total) if item.total else 0,
+                "receipt_count": item.count,
+                "percentage": round((item.total / total_expense) * 100, 2) if total_expense > 0 else 0
+            })
+            
+        # ดึงข้อมูลใบเสร็จที่ไม่ได้ระบุหมวดหมู่
+        uncategorized_query = db.query(
+            func.sum(Receipt.amount).label('total'),
+            func.count(Receipt.id).label('count')
+        ).filter(
+            Receipt.user_id == current_user.id,
+            Receipt.receipt_date >= start_date,
+            Receipt.receipt_date <= end_date,
+            Receipt.category_id == None
+        )
+        
+        uncategorized = uncategorized_query.first()
+        if uncategorized and uncategorized.count and uncategorized.count > 0:
+            results.append({
+                "category_name": "ไม่ระบุหมวดหมู่",
+                "total": float(uncategorized.total) if uncategorized.total else 0,
+                "receipt_count": uncategorized.count,
+                "percentage": round((uncategorized.total / total_expense) * 100, 2) if total_expense > 0 else 0
+            })
+    except Exception as e:
+        # บันทึกข้อผิดพลาดและส่งค่าว่างกลับไป
+        import logging
+        logging.error(f"Error querying categories: {str(e)}")
+        # กรณีไม่มีข้อมูล ส่งลิสต์ว่างกลับไป
+        return []
     
-    # สร้าง dictionary สำหรับเก็บข้อมูลหมวดหมู่แต่ละประเภท
-    categories_data = {}
-    for item in results:
-        categories_data[item.category_name] = {
-            "category_name": item.category_name,
-            "total": float(item.total) if item.total else 0,
-            "receipt_count": item.count,
-            "percentage": round((item.total / total_expense) * 100, 2) if total_expense > 0 else 0
-        }
-    
-    # ดึงข้อมูลใบเสร็จที่ไม่ได้ระบุหมวดหมู่
-    uncategorized_query = db.query(
-        func.sum(Receipt.amount).label('total'),
-        func.count(Receipt.id).label('count')
-    ).filter(
-        Receipt.user_id == current_user.id,
-        Receipt.receipt_date >= start_date,
-        Receipt.receipt_date <= end_date,
-        Receipt.category_id == None
-    )
-    
-    uncategorized = uncategorized_query.first()
-    if uncategorized and uncategorized.count > 0:
-        categories_data["ไม่ระบุหมวดหมู่"] = {
-            "category_name": "ไม่ระบุหมวดหมู่",
-            "total": float(uncategorized.total) if uncategorized.total else 0,
-            "receipt_count": uncategorized.count,
-            "percentage": round((uncategorized.total / total_expense) * 100, 2) if total_expense > 0 else 0
-        }
-    
-    return list(categories_data.values())
+    # หากไม่มีข้อมูล ให้ส่งลิสต์ว่างกลับไป
+    if not results:
+        return []
+        
+    return results
 
 # ในไฟล์ app/api/routes/receipts.py
 @router.put("/{receipt_id}/category", status_code=status.HTTP_200_OK)
@@ -315,3 +324,80 @@ def update_receipt_category(
     db.commit()
     
     return {"message": "อัปเดตหมวดหมู่สำเร็จ"}
+
+@router.get("/budget-comparison", response_model=List[dict])
+def get_budget_comparison(
+    month: Optional[int] = Query(None, ge=1, le=12),
+    year: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """ดึงข้อมูลเปรียบเทียบงบประมาณกับค่าใช้จ่ายจริง"""
+    # ถ้าไม่ระบุเดือนและปี ให้ใช้เดือนและปีปัจจุบัน
+    if month is None or year is None:
+        today = datetime.now()
+        month = month or today.month
+        year = year or today.year
+    
+    # ใช้ common table expression (CTE) ใน SQLAlchemy
+    from app.models.receipt import Receipt
+    from app.models.category import Category
+    from app.models.budget import Budget
+    
+    # สร้าง subquery สำหรับค่าใช้จ่ายจริงในแต่ละหมวดหมู่
+    expenses_subquery = (
+        db.query(
+            Receipt.category_id,
+            func.sum(Receipt.amount).label('total_spent')
+        )
+        .filter(
+            Receipt.user_id == current_user.id,
+            func.extract('month', Receipt.receipt_date) == month,
+            func.extract('year', Receipt.receipt_date) == year
+        )
+        .group_by(Receipt.category_id)
+        .subquery()
+    )
+    
+    # ดึงข้อมูลงบประมาณพร้อมค่าใช้จ่ายจริง
+    results = (
+        db.query(
+            Budget.id,
+            Budget.user_id,
+            Budget.category_id,
+            Category.name.label('category_name'),
+            Budget.amount,
+            Budget.month,
+            Budget.year,
+            Budget.created_at,
+            func.coalesce(expenses_subquery.c.total_spent, 0).label('spent')
+        )
+        .join(Category, Budget.category_id == Category.id)
+        .outerjoin(expenses_subquery, Budget.category_id == expenses_subquery.c.category_id)
+        .filter(
+            Budget.user_id == current_user.id,
+            Budget.month == month,
+            Budget.year == year
+        )
+        .all()
+    )
+    
+    # คำนวณเปอร์เซ็นต์การใช้จ่าย
+    response_data = []
+    for row in results:
+        percentage = round((row.spent / row.amount * 100) if row.amount > 0 else 0)
+        
+        response_data.append({
+            "id": row.id,
+            "user_id": row.user_id,
+            "category_id": row.category_id,
+            "category_name": row.category_name,
+            "amount": row.amount,
+            "month": row.month,
+            "year": row.year,
+            "created_at": row.created_at,
+            "spent": row.spent,
+            "percentage": percentage
+        })
+    
+    return response_data

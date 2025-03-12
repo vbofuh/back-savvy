@@ -17,3 +17,6 @@ class User(Base):
     
     # เพิ่มความสัมพันธ์ในคลาส User
     imap_settings = relationship("ImapSetting", back_populates="user", cascade="all, delete-orphan")
+    
+    # อ้างถึง Budget ด้วยชื่อเป็น string แทนการ import คลาส
+    budgets = relationship("Budget", back_populates="user", cascade="all, delete-orphan")
