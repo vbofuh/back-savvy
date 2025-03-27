@@ -53,7 +53,7 @@ class IMAPClient:
                 pass
 
     def search_emails(self, days: int = 30, limit: int = 50, search_criteria: str = None) -> List[int]:
-        """ค้นหาอีเมลตามเงื่อนไข โดยสามารถระบุจำนวนวันย้อนหลังและจำนวนจำกัดได้"""
+        """วันและจำนวนเมลจะค้นหา"""
         try:
             # เลือกโฟลเดอร์
             self.connection.select(self.imap_setting.folder)
